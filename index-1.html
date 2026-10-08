@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="hr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Taxi Nav Zagreb</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+*{box-sizing:border-box}html,body,#map{height:100%;margin:0;font-family:Arial,sans-serif}body{overflow:hidden;background:#111;color:#fff}.top{position:fixed;z-index:1000;top:10px;left:10px;right:10px}.search{background:#171717;border-radius:18px;box-shadow:0 4px 18px #0008;padding:10px}.row{display:flex;gap:8px}.search input{flex:1;border:0;outline:0;background:#252525;color:#fff;border-radius:12px;padding:14px;font-size:16px}.btn{border:0;border-radius:12px;background:#f5c400;color:#111;font-weight:700;padding:0 14px}.suggestions{margin-top:7px;max-height:46vh;overflow:auto;border-radius:12px}.s{background:#202020;padding:12px;border-bottom:1px solid #333;cursor:pointer}.s b{display:block}.s small{color:#aaa}.chips{display:flex;gap:7px;margin-top:8px;overflow:auto}.chip{white-space:nowrap;background:#202020;color:#fff;border:0;border-radius:20px;padding:9px 12px}.bottom{position:fixed;z-index:1000;left:10px;right:10px;bottom:10px;background:#171717;border-radius:18px;padding:14px;box-shadow:0 4px 18px #0009}.title{font-weight:800;font-size:18px}.muted{color:#aaa;font-size:13px;margin-top:4px}.actions{display:flex;gap:8px;margin-top:10px}.actions button{flex:1;padding:11px;border:0;border-radius:11px;font-weight:700}.taxi{background:#f5c400}.dark{background:#333;color:#fff}.stop{background:#b82020;color:#fff}.nav{position:fixed;z-index:1100;top:95px;left:50%;transform:translateX(-50%);background:#111d;border-radius:18px;padding:13px 20px;text-align:center;min-width:210px;display:none;box-shadow:0 4px 18px #0009}.nav b{font-size:20px}.nav .dist{font-size:30px;font-weight:900;color:#f5c400}.bat{position:fixed;z-index:2000;inset:0;background:radial-gradient(circle at 50% 35%,#202020,#050505 70%);display:none;align-items:center;justify-content:center;text-align:center}.batbox{padding:25px}.batlogo{font-size:90px;line-height:1}.bat h1{font-size:28px;margin:15px 0 6px}.bat p{color:#bbb}.bat button{margin-top:15px;padding:13px 20px;border:0;border-radius:12px;background:#f5c400;font-weight:800}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="top">
+ <div class="search"><div class="row"><input id="q" placeholder="Kamo ideš?" autocomplete="off"><button class="btn" id="gpsBtn">GPS</button></div><div id="suggestions" class="suggestions"></div></div>
+ <div class="chips"><button class="chip" id="myBtn">Moja lokacija</button><button class="chip" id="fuelBtn">Benzinske</button><button class="chip" id="parkBtn">Parking</button></div>
+</div>
+<div id="nav" class="nav"><b id="turn">Nastavi ravno</b><div id="dist" class="dist">—</div><div id="next">—</div></div>
+<div class="bottom"><div class="title" id="routeTitle">TAXI</div><div id="routeInfo" class="muted">Upiši adresu za početak.</div><div class="actions"><button class="taxi" id="navBtn">Navigacija</button><button class="dark" id="taxiBtn">Taxi pravila</button><button class="stop" id="stopBtn">Zaustavi</button></div></div>
+<div id="bat" class="bat"><div class="batbox"><div class="batlogo">🦇</div><h1>RUTA DO BATCAVE-A</h1><p>Nemetinska 25 je identificirana.<br>Batman čeka.</p><button id="batGo">Kreni prema Batcave-u</button><br><button id="batClose" class="dark" style="margin-top:8px">Natrag</button></div></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map=L.map('map').setView([45.815,15.982],13);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);
+let me=null,dest=null,routeLine=null,watchId=null,navigating=false,currentRoute=null,lastVoice=0;
+const q=document.getElementById('q'), box=document.getElementById('suggestions');
+const ARC='https://gis.zagreb.hr/server/rest/services/solari2024/MapServer/4/query';
+function esc(s){return s.replace(/'/g,"''")}
+function cleanStreet(s){return (s||'').replace(/\s+/g,' ').trim()}
+function label(f){let a=f.attributes||f;let street=cleanStreet(a.ULICA||'');let num=cleanStreet(a.KUCNI_BROJ||'');return num?`${street} ${num}, Zagreb`:street+', Zagreb'}
+function coords(f){let g=f.geometry||{};if(g.x!=null&&g.y!=null){return [g.y,g.x]}return null}
+async function arcQuery(where,limit=60){
+ const u=ARC+'?where='+encodeURIComponent(where)+'&outFields=ULICA,KUCNI_BROJ,NASELJE&returnGeometry=true&outSR=4326&orderByFields=ULICA,KUCNI_BROJ&resultRecordCount='+limit+'&f=json';
+ const r=await fetch(u,{mode:'cors'});if(!r.ok)throw Error('GIS '+r.status);const j=await r.json();return j.features||[];
+}
+async function geocodeOfficial(text){
+ let m=text.trim().match(/^(.+?)\s+(\d+[A-Za-z]?)$/);let street=m?m[1]:text.trim(),num=m?m[2]:null;
+ let where;
+ if(num) where=`ULICA LIKE '%${esc(street)}%' AND KUCNI_BROJ LIKE '${esc(num)}%'`;
+ else where=`ULICA LIKE '%${esc(street)}%'`;
+ let fs=await arcQuery(where,num?20:80);
+ if(!fs.length && num){fs=await arcQuery(`ULICA LIKE '%${esc(street)}%'`,120);fs=fs.filter(f=>String(f.attributes.KUCNI_BROJ||'').toLowerCase()===num.toLowerCase())}
+ return fs;
+}
+async function nominatim(text){
+ const u='https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&countrycodes=hr&city=Zagreb&q='+encodeURIComponent(text+', Zagreb');
+ const r=await fetch(u,{headers:{'Accept-Language':'hr'}});if(!r.ok)throw Error('Nominatim');return await r.json();
+}
+function show(fs,ns){
+ box.innerHTML='';const seen=new Set();
+ fs.forEach(f=>{let c=coords(f),l=label(f);if(!c||seen.has(l))return;seen.add(l);let d=document.createElement('div');d.className='s';d.innerHTML='<b>'+l+'</b><small>Grad Zagreb · kućni broj</small>';d.onclick=()=>select(c,l);box.appendChild(d)});
+ ns.forEach(n=>{let l=n.display_name||'';let c=[+n.lat,+n.lon];let short=l.replace(/, Hrvatska.*$/,'');if(seen.has(short))return;let d=document.createElement('div');d.className='s';d.innerHTML='<b>'+short+'</b><small>OpenStreetMap</small>';d.onclick=()=>select(c,short);box.appendChild(d)});
+ if(!box.children.length)box.innerHTML='<div class="s"><small>Nema pronađenih adresa.</small></div>';
+}
+let timer; q.addEventListener('input',()=>{clearTimeout(timer);let t=q.value.trim();if(t.length<2){box.innerHTML='';return}timer=setTimeout(async()=>{try{let fs=await geocodeOfficial(t);let ns=fs.length?[]:await nominatim(t);show(fs,ns)}catch(e){try{show([],await nominatim(t))}catch(_){box.innerHTML='<div class="s"><small>Pretraga trenutno nije dostupna.</small></div>'}}},300)});
+async function select(c,l){q.value=l;box.innerHTML='';dest=c;L.marker(c).addTo(map).bindPopup(l).openPopup();map.setView(c,16);if(/nemetinska\s+25\b/i.test(l)||/nemetinska\s+25\b/i.test(q.value))document.getElementById('bat').style.display='flex';await route();}
+async function route(){if(!me||!dest){document.getElementById('routeInfo').textContent='Čekam GPS lokaciju i odredište.';return}let u=`https://router.project-osrm.org/route/v1/driving/${me[1]},${me[0]};${dest[1]},${dest[0]}?overview=full&geometries=geojson&steps=true&alternatives=true`;try{let j=await fetch(u).then(r=>r.json());if(!j.routes?.length)throw Error();currentRoute=j.routes[0];if(routeLine)map.removeLayer(routeLine);routeLine=L.geoJSON(currentRoute.geometry).addTo(map);map.fitBounds(routeLine.getBounds(),{padding:[80,80]});document.getElementById('routeInfo').textContent=`${Math.round(currentRoute.duration/60)} min · ${(currentRoute.distance/1000).toFixed(1)} km · Taxi ruta spremna`;document.getElementById('routeTitle').textContent='TAXI';}catch(e){document.getElementById('routeInfo').textContent='Ruta trenutno nije dostupna.'}}
+function setMe(p){me=[p.coords.latitude,p.coords.longitude];if(!window.meMarker)window.meMarker=L.circleMarker(me,{radius:8,color:'#168cff',fillColor:'#168cff',fillOpacity:1}).addTo(map);else window.meMarker.setLatLng(me);if(!dest)map.setView(me,15);if(dest)route()}
+function gps(){if(!navigator.geolocation)return;watchId=navigator.geolocation.watchPosition(setMe,()=>{}, {enableHighAccuracy:true,maximumAge:2000,timeout:10000});navigator.geolocation.getCurrentPosition(setMe,()=>{},{enableHighAccuracy:true})}
+gps();document.getElementById('gpsBtn').onclick=()=>{gps();if(me)map.setView(me,16)};document.getElementById('myBtn').onclick=()=>{if(me)map.setView(me,16)};
+document.getElementById('navBtn').onclick=()=>{if(!dest)return; navigating=true;document.getElementById('nav').style.display='block';speak('Navigacija pokrenuta')};
+document.getElementById('stopBtn').onclick=()=>{navigating=false;document.getElementById('nav').style.display='none'};
+document.getElementById('taxiBtn').onclick=()=>alert('Taxi pravila: ovo je prototip. Pravila po ulicama moramo još povezati sa službenim izvorima i privremenim regulacijama.');
+function speak(t){if(Date.now()-lastVoice<4000)return;lastVoice=Date.now();if('speechSynthesis' in window){let u=new SpeechSynthesisUtterance(t);u.lang='hr-HR';speechSynthesis.speak(u)}}
+document.getElementById('fuelBtn').onclick=()=>poi('amenity=fuel');document.getElementById('parkBtn').onclick=()=>poi('amenity=parking');
+async function poi(tag){if(!me)return;let q=`[out:json][timeout:10];node[${tag}](around:4000,${me[0]},${me[1]});out;`;try{let j=await fetch('https://overpass-api.de/api/interpreter',{method:'POST',body:q}).then(r=>r.json());j.elements.slice(0,25).forEach(x=>L.marker([x.lat,x.lon]).addTo(map).bindPopup(x.tags?.name||tag.split('=')[1]))}catch(e){alert('POI servis trenutno nije dostupan.')}}
+document.getElementById('batClose').onclick=()=>document.getElementById('bat').style.display='none';document.getElementById('batGo').onclick=()=>{document.getElementById('bat').style.display='none';navigating=true;document.getElementById('nav').style.display='block';speak('Krećemo prema Batcave-u')};
+</script></body></html>
